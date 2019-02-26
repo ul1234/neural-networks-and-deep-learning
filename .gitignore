@@ -4,5 +4,6 @@
 *.pkl
 *.pyc
 .DS_Store
+.idea/
 loc.py
 src/ec2
