@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import time
+import time, sys, json
+import pprint
 
 # activation function: sigmoid, softmax(output layer), tanh, rectified linear(ReLU)
 # cost function: quadratic, cross-entropy
@@ -11,6 +12,23 @@ import time
 # stochastic gradient descent: momentum-based
 
 # hyper-parameters: learning rate, epoch (early stopping), regularization lambda, mini-batch size
+
+class Debug(object):
+    ENABLE = False
+    OUTPUT_FILE = ''
+
+    @staticmethod
+    def output_file(filename):
+        Debug.OUTPUT_FILE = filename
+        if filename: open(filename, 'w').close()
+
+    @staticmethod
+    def print_(*str):
+        if Debug.ENABLE:
+            for s in str:
+                pp = pprint.PrettyPrinter(width = 200, depth = 10, stream = open(Debug.OUTPUT_FILE, 'a') if Debug.OUTPUT_FILE else None)
+                pp.pprint(s)
+                sys.stdout.flush()
 
 class Sigmoid(object):
     @staticmethod
@@ -36,9 +54,20 @@ class WeightRandom(object):
         # biases: num_layer-1 elements, each element is n (the current layer)
         biases = [np.random.randn(sizes[layer], 1) for layer in range(1, num_layers)]
         return weights, biases
-        
+
+class WeightConstant(object):
+    @staticmethod
+    def init(sizes):
+        num_layers = len(sizes)
+        weights = [0.5*np.ones((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
+        biases = [0.5*np.ones((sizes[layer], 1)) for layer in range(1, num_layers)]
+        return weights, biases
+
 class Network(object):
     def __init__(self, sizes):
+        self.init(sizes)
+
+    def init(self, sizes):
         # sizes, number of neurons of [input_layer, hidden layer, ..., output_layer]
         self.sizes = sizes
         self.num_layers = len(sizes)
@@ -67,6 +96,7 @@ class Network(object):
 
     def back_propogation(self, x, y):
         a, a_layers, z_layers = self.feedforward_layers(x)
+        Debug.print_('feedforward: x:', x, 'a:', a)
         delta_w, delta_b = [], []
         for layer in range(self.num_layers-1, 0, -1):
             if layer == self.num_layers-1:
@@ -83,12 +113,19 @@ class Network(object):
     def mini_batch_update(self, training_data, learning_rate):
         delta_w = [np.zeros(w.shape) for w in self.weights]
         delta_b = [np.zeros(b.shape) for b in self.biases]
+        Debug.print_('delta_w:', delta_w, 'delta_b:', delta_b)
         for x, y in training_data:
+            Debug.print_('x:', x, 'y:', y)
             delta_w_i, delta_b_i = self.back_propogation(x, y)
+            Debug.print_('delta_w_i:', delta_w_i, 'delta_b_i:', delta_b_i)
             delta_w = [w + w_i for w, w_i in zip(delta_w, delta_w_i)]
             delta_b = [b + b_i for b, b_i in zip(delta_b, delta_b_i)]
+        Debug.print_('delta_w:', delta_w, 'delta_b:', delta_b)
+        Debug.print_('weights:', self.weights, 'biases:', self.biases)
         self.weights = [w - learning_rate / len(training_data) * dw for w, dw in zip(self.weights, delta_w)]
         self.biases = [d - learning_rate / len(training_data) * dd for d, dd in zip(self.biases, delta_b)]
+        Debug.print_('weights:', self.weights, 'biases:', self.biases)
+        Debug.ENABLE = False
 
     # stochastic gradient descent
     def sgd(self, training_data, epoch, mini_batch_size, learning_rate, test_data = []):
@@ -107,13 +144,36 @@ class Network(object):
     def test(self, test_data):
         num_pass = sum([y == np.argmax(self.feedforward(x)) for x, y in test_data])
         return num_pass * 1.0 / len(test_data)
-    
+
+    def save(self, filename):
+        data = {'sizes': self.sizes,
+                'weights': [w.tolist() for w in self.weights],
+                'biases': [b.tolist() for b in self.biases],
+                'act_func': str(self.act_func.__name__),
+                'cost_func': str(self.cost_func.__name__)}
+        with open(filename, 'w') as f:
+            json.dump(data, f)
+
+    def load(self, filename):
+        data = json.load(open(filename, 'r'))
+        self.init(data['sizes'])
+        self.weights = [np.array(w) for w in data['weights']]
+        self.biases = [np.array(b) for b in data['biases']]
+
 
 if __name__ == '__main__':
     import mnist_loader
     training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
     net = Network([784, 30, 10])
-    net.sgd(training_data, 30, 10, 3.0, test_data=test_data)
+    #net.sgd(training_data, 2, 10, 3.0, test_data = test_data)
+    #net.save('network.txt')
+
+    #net.set(weight_func = WeightConstant)
+    Debug.ENABLE = True
+    Debug.output_file('output4.txt')
+    net.load('network.txt')
+    net.sgd(training_data, 1, 10, 3.0, test_data=test_data)
+    #net.sgd(training_data, 30, 10, 3.0, test_data=test_data)
 
 
 
