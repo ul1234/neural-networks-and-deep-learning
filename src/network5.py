@@ -40,32 +40,75 @@ class Sigmoid(object):
         a = Sigmoid.f(z)
         return a * (1 - a)
 
+    @staticmethod
+    def derivative_a(a):
+        return a * (1 - a)
+
+class ReLU(object):
+    @staticmethod
+    def f(z):
+        z[z < 0] = 0
+        return z
+
+    @staticmethod
+    def derivative_a(a):
+        a[a <= 0] = 0
+        a[a > 0] = 1
+        return a
+
+class Softmax(object):
+    @staticmethod
+    def f(z):
+        exp_z = np.exp(z)
+        return exp_z / exp_z.sum(axis = 0)
+
+class Loglikelihood(object):
+    @staticmethod
+    def delta(a, y):  # with Softmax
+        return a - y
+
 class Quadratic(object):
     @staticmethod
     def derivative(a, y):
         return (a - y)
 
-class WeightRandom(object):
     @staticmethod
-    def init(sizes):
+    def delta(a, y):  # with Sigmoid
+        return (a - y) * Sigmoid.derivative_a(a)
+
+class CrossEntropy(object):
+    @staticmethod
+    def derivative(a, y):
+        return (a - y) / ( a * (1 - a))
+
+    @staticmethod
+    def delta(a, y):  # with Sigmoid
+        return (a - y)
+
+class WeightRandom(object):
+    def __init__(self, mean = 0):
+        self.mean = mean
+
+    def init(self, sizes):
         num_layers = len(sizes)
         # weights: num_layers-1 elements, each element is m (the latter layer) * n (the former layer)
-        weights = [np.random.randn(sizes[layer], sizes[layer-1]) for layer in range(1, num_layers)]
+        weights = [self.mean + np.random.randn(sizes[layer], sizes[layer-1]) for layer in range(1, num_layers)]
         # biases: num_layer-1 elements, each element is n (the current layer)
-        biases = [np.random.randn(sizes[layer], 1) for layer in range(1, num_layers)]
+        biases = [self.mean + np.random.randn(sizes[layer], 1) for layer in range(1, num_layers)]
         return weights, biases
 
 class WeightConstant(object):
     @staticmethod
     def init(sizes):
         num_layers = len(sizes)
-        weights = [0.5*np.ones((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
-        biases = [0.5*np.ones((sizes[layer], 1)) for layer in range(1, num_layers)]
+        weights = [np.ones((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
+        biases = [np.ones((sizes[layer], 1)) for layer in range(1, num_layers)]
         return weights, biases
 
 class Network(object):
     def __init__(self, sizes):
         self.init(sizes)
+        self.init_weights()
 
     def init(self, sizes):
         # sizes, number of neurons of [input_layer, hidden layer, ..., output_layer]
@@ -73,12 +116,26 @@ class Network(object):
         self.num_layers = len(sizes)
         self.set()
 
-    def set(self, activation_func = Sigmoid, cost_func = Quadratic, regularization = None, weight_func = WeightRandom):
+    def init_weights(self, weight_func = WeightRandom(), weights = None, biases = None):
+        if weights and biases:
+            self.weights, self.biases = weights, biases
+        else:
+            self.weights, self.biases = weight_func.init(self.sizes)
+
+    def save_weights(self):
+        self.saved_weights = (self.weights, self.biases)
+
+    def reload_weights(self):
+        if hasattr(self, 'saved_weights'):
+            self.weights, self.biases = self.saved_weights
+        else:
+            print 'no saved weights'
+
+    def set(self, activation_func = Sigmoid, cost_func = Quadratic, last_layer_activation_func = None, regularization = None):
         self.act_func = activation_func
         self.cost_func = cost_func
+        self.last_layer_act_func = last_layer_activation_func or self.act_func
         self.regularization = regularization
-        self.weight_func = weight_func
-        self.weights, self.biases = self.weight_func.init(self.sizes)
 
     def feedforward(self, a):
         (a, _, _) = self.feedforward_layers(a)
@@ -87,9 +144,9 @@ class Network(object):
     def feedforward_layers(self, a):
         a_layers = [a]
         z_layers = [None]
-        for weight, bias in zip(self.weights, self.biases):
+        for i, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             z = np.dot(weight, a) + bias
-            a = self.act_func.f(z)
+            a = self.last_layer_act_func.f(z) if i == len(self.biases) else self.act_func.f(z)
             a_layers.append(a)
             z_layers.append(z)
         return (a, a_layers, z_layers)
@@ -98,11 +155,13 @@ class Network(object):
         a, a_layers, z_layers = self.feedforward_layers(x)
         delta_w, delta_b = [], []
         for layer in range(self.num_layers-1, 0, -1):
-            if layer == self.num_layers-1:
-                delta = self.cost_func.derivative(a, y)
+            if layer == self.num_layers-1:  # the last layer
+                #delta = self.cost_func.derivative(a, y)
+                delta = self.cost_func.delta(a, y)
             else:
                 delta = np.dot(self.weights[layer].transpose(), delta)
-            delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
+                #delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
+                delta *= self.act_func.derivative_a(a_layers[layer])  # delta for layer
             delta_w.append(np.dot(delta, a_layers[layer-1].transpose()))
             delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
         delta_w.reverse()
@@ -120,7 +179,7 @@ class Network(object):
         self.weights = [w - learning_rate / len(training_data) * dw for w, dw in zip(self.weights, delta_w)]
         self.biases = [d - learning_rate / len(training_data) * dd for d, dd in zip(self.biases, delta_b)]
         #Debug.print_('weights:', self.weights, 'biases:', self.biases)
-        
+
     def mini_batch_update(self, training_data, learning_rate):
         # training for the whole mini_batch data once
         nx, ny, data_size = training_data[0][0].size, training_data[0][1].size, len(training_data)
@@ -135,6 +194,8 @@ class Network(object):
     def sgd(self, training_data, epoch, mini_batch_size, learning_rate, test_data = []):
         # training_data, [(x0, y0), (x1, y1), ...]
         time_start = time.time()
+        if test_data:
+            print 'start: accurate rate %.2f%%, elapsed: %.1fs' % (100*self.test(test_data), time.time() - time_start)
         for t in range(epoch):
             np.random.shuffle(training_data)
             start = 0
@@ -172,7 +233,7 @@ if __name__ == '__main__':
     net = Network([784, 30, 10])
     #net.sgd(training_data, 2, 10, 3.0, test_data = test_data)
     #net.save('network.txt')
-
+    net.set(cost_func = CrossEntropy)
     #Debug.ENABLE = True
     #Debug.output_file('output5.txt')
     #net.load('network.txt')
