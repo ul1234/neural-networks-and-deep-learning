@@ -17,19 +17,20 @@ class Debug(object):
     ENABLE = False
     OUTPUT_FILE = ''
 
-    @staticmethod
-    def output_file(filename):
-        Debug.OUTPUT_FILE = filename
+    @classmethod
+    def output_file(cls, filename):
+        cls.OUTPUT_FILE = filename
         if filename: open(filename, 'w').close()
 
-    @staticmethod
-    def print_(*str):
-        if Debug.ENABLE:
+    @classmethod
+    def print_(cls, *str):
+        if cls.ENABLE:
             for s in str:
-                pp = pprint.PrettyPrinter(width = 200, depth = 10, stream = open(Debug.OUTPUT_FILE, 'a') if Debug.OUTPUT_FILE else None)
+                pp = pprint.PrettyPrinter(width = 200, depth = 10, stream = open(cls.OUTPUT_FILE, 'a') if cls.OUTPUT_FILE else None)
                 pp.pprint(s)
                 sys.stdout.flush()
 
+########### activation function ####################
 class Sigmoid(object):
     @staticmethod
     def f(z):
@@ -37,24 +38,40 @@ class Sigmoid(object):
 
     @staticmethod
     def derivative(z):
-        a = Sigmoid.f(z)
+        a = f.__func__(z)
         return a * (1 - a)
 
     @staticmethod
     def derivative_a(a):
         return a * (1 - a)
 
+class Tanh(object):
+    @staticmethod
+    def f(z):
+        t1 = np.exp(z)
+        t2 = np.exp(-z)
+        return (t1 - t2) / (t1 + t2)
+
+    @staticmethod
+    def derivative_a(a):
+        return 1 - a * a
+
+# seems when using ReLU, small standardized initial weights and zero initial biases should be used
+# also smaller learning rate
+# the performance greatly depends on the initial weights, seems some local minimum exist???
 class ReLU(object):
     @staticmethod
     def f(z):
-        z[z < 0] = 0
-        return z
+        temp = z.copy()
+        temp[temp < 0] = 0
+        return temp
 
     @staticmethod
     def derivative_a(a):
-        a[a <= 0] = 0
-        a[a > 0] = 1
-        return a
+        temp = a.copy()
+        temp[temp <= 0] = 0
+        temp[temp > 0] = 1
+        return temp
 
 class Softmax(object):
     @staticmethod
@@ -62,49 +79,157 @@ class Softmax(object):
         exp_z = np.exp(z)
         return exp_z / exp_z.sum(axis = 0)
 
+########### cost function ####################
 class Loglikelihood(object):
     @staticmethod
-    def delta(a, y):  # with Softmax
+    def cost(a, y):
+        return -(y * np.log(a)).sum(axis = 0).mean()
+
+    @staticmethod
+    def delta(a, y, act_func = Softmax):
+        assert act_func == Softmax, 'only Softmax is supported with Loglikelihood'
         return a - y
 
 class Quadratic(object):
+    @staticmethod
+    def cost(a, y):
+        return np.square(a - y).mean()
+
     @staticmethod
     def derivative(a, y):
         return (a - y)
 
     @staticmethod
-    def delta(a, y):  # with Sigmoid
-        return (a - y) * Sigmoid.derivative_a(a)
+    def delta(a, y, act_func = Sigmoid):
+        return (a - y) * act_func.derivative_a(a)
 
 class CrossEntropy(object):
+    @staticmethod
+    def cost(a, y):
+        return -(y * np.log(a) + (1 - y) * np.log(1 - a)).mean()
+
     @staticmethod
     def derivative(a, y):
         return (a - y) / ( a * (1 - a))
 
     @staticmethod
-    def delta(a, y):  # with Sigmoid
+    def delta(a, y, act_func = Sigmoid):
+        assert act_func == Sigmoid, 'only Sigmoid is supported with CrossEntropy'
         return (a - y)
 
+########### regularization ####################
+class RegularNone(object):
+    def cost(self, weights, data_size):
+        return 0
+
+    def update_weights(self, weights, learning_rate, total_training_size):
+        return weights
+
+class RegularL2(object):
+    def __init__(self, lmda = 0.1):
+        self.lmda = lmda
+
+    def cost(self, weights, data_size):
+        return self.lmda / 2 / data_size * sum([np.square(w).sum() for w in weights])
+
+    def update_weights(self, weights, learning_rate, total_training_size):
+        return (1 - self.lmda * learning_rate / total_training_size) * weights
+
+class RegularL1(object):
+    def __init__(self, lmda = 0.1):
+        self.lmda = lmda
+
+    def cost(self, weights, data_size):
+        return self.lmda / data_size * sum([np.abs(w).sum() for w in weights])
+
+    def update_weights(self, weights, learning_rate, total_training_size):
+        return weights - self.lmda * learning_rate / total_training_size * np.sign(weights)
+
+class Dropout(object):
+    def __init__(self, drop_probability = 0.5):
+        self.drop_probability = drop_probability
+
+    def process(self, z, a):
+        assert z.size == a.size, 'invalid size of a or z'
+        index = range(z.shape[0])
+        np.random.shuffle(index)
+        drop_index = index[:int(len(index) * self.drop_probability)]
+        z[drop_index] = 0   # drop the neuron is equivalent to set z and a to 0
+        a[drop_index] = 0
+        
+    def adjust_weight(self, weight):
+        return weight * (1-self.drop_probability)
+
+########### weight initialize function ####################
+class WeightOpt(object):
+    def init(self, sizes):
+        num_layers = len(sizes)
+        # weights: num_layers-1 elements, each element is m (the latter layer) * n (the former layer) matrix
+        # biases: num_layer-1 elements, each element is n (the current layer) * 1 matrix
+        #weights = [np.random.randn(sizes[layer], sizes[layer-1]) / np.sqrt(sizes[layer-1]) for layer in range(1, num_layers)]
+        weights = [np.random.randn(sizes[layer], sizes[layer-1]) / sizes[layer-1] for layer in range(1, num_layers)]
+        biases = [np.zeros((sizes[layer], 1)) for layer in range(1, num_layers)]
+        return weights, biases
+
 class WeightRandom(object):
-    def __init__(self, mean = 0):
+    def __init__(self, mean = 0, bias_zero = False, large = True):
         self.mean = mean
+        self.bias_zero = bias_zero
+        self.large = large
 
     def init(self, sizes):
         num_layers = len(sizes)
-        # weights: num_layers-1 elements, each element is m (the latter layer) * n (the former layer)
-        weights = [self.mean + np.random.randn(sizes[layer], sizes[layer-1]) for layer in range(1, num_layers)]
-        # biases: num_layer-1 elements, each element is n (the current layer)
-        biases = [self.mean + np.random.randn(sizes[layer], 1) for layer in range(1, num_layers)]
+        if self.large:
+            weights = [self.mean + np.random.randn(sizes[layer], sizes[layer-1]) for layer in range(1, num_layers)]
+        else:
+            weights = [self.mean + np.random.randn(sizes[layer], sizes[layer-1]) / np.sqrt(sizes[layer-1]) for layer in range(1, num_layers)]
+        if self.bias_zero:
+            biases = [np.zeros((sizes[layer], 1)) for layer in range(1, num_layers)]
+        else:
+            if self.large:
+                biases = [self.mean + np.random.randn(sizes[layer], 1) for layer in range(1, num_layers)]
+            else:
+                biases = [self.mean + np.random.randn(sizes[layer], 1) / np.sqrt(sizes[layer]) for layer in range(1, num_layers)]
         return weights, biases
 
 class WeightConstant(object):
-    @staticmethod
+    def __init__(self, w = 0, b = 0):
+        self.constant_w = w
+        self.constant_b = b
+
     def init(sizes):
         num_layers = len(sizes)
-        weights = [np.ones((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
-        biases = [np.ones((sizes[layer], 1)) for layer in range(1, num_layers)]
+        weights = [self.constant_w * np.ones((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
+        biases = [self.constant_b * np.ones((sizes[layer], 1)) for layer in range(1, num_layers)]
         return weights, biases
 
+class MomentumSgd(object):
+    def __init__(self, learning_rate = 0.1, coeffient = 0.5):
+        self.learning_rate = learning_rate
+        self.coeffient = coeffient
+
+    def init(self, sizes):
+        num_layers = len(sizes)
+        self.weights_velocity = [np.zeros((sizes[layer], sizes[layer-1])) for layer in range(1, num_layers)]
+        self.biases_velocity = [np.zeros((sizes[layer], 1)) for layer in range(1, num_layers)]
+
+    def update_weights(self, weights, biases, delta_w, delta_b, data_size, total_training_size, regularization):
+        self.weights_velocity = [self.coeffient * wv - self.learning_rate / data_size * dwv for wv, dwv in zip(self.weights_velocity, delta_w)]
+        self.biases_velocity = [self.coeffient * bv - self.learning_rate / data_size * dbv for bv, dbv in zip(self.biases_velocity, delta_b)]
+        weights = [regularization.update_weights(w, self.learning_rate, total_training_size) + wv for w, wv in zip(weights, self.weights_velocity)]
+        biases = [b + bv for b, bv in zip(biases, self.biases_velocity)]
+        return weights, biases
+
+class Sgd(object):
+    def __init__(self, learning_rate = 0.1):
+        self.learning_rate = learning_rate
+
+    def update_weights(self, weights, biases, delta_w, delta_b, data_size, total_training_size, regularization):
+        weights = [regularization.update_weights(w, self.learning_rate, total_training_size) - self.learning_rate / data_size * dw for w, dw in zip(weights, delta_w)]
+        biases = [b - self.learning_rate / data_size * db for b, db in zip(biases, delta_b)]
+        return weights, biases
+
+########### neural network ####################
 class Network(object):
     def __init__(self, sizes):
         self.init(sizes)
@@ -114,50 +239,61 @@ class Network(object):
         # sizes, number of neurons of [input_layer, hidden layer, ..., output_layer]
         self.sizes = sizes
         self.num_layers = len(sizes)
-        self.set()
+        self.set_neuron()
+        self.set_regularization()
+        self.set_train_func()
+        self.set_dropout()
 
-    def init_weights(self, weight_func = WeightRandom(), weights = None, biases = None):
-        if weights and biases:
-            self.weights, self.biases = weights, biases
-        else:
-            self.weights, self.biases = weight_func.init(self.sizes)
-
-    def save_weights(self):
+    def init_weights(self, weight_func = WeightOpt()):
+        self.weights, self.biases = weight_func.init(self.sizes)
         self.saved_weights = (self.weights, self.biases)
+        if hasattr(self.train_func, 'init'): self.train_func.init(self.sizes)
 
     def reload_weights(self):
-        if hasattr(self, 'saved_weights'):
-            self.weights, self.biases = self.saved_weights
-        else:
-            print 'no saved weights'
+        assert hasattr(self, 'saved_weights'), 'no saved weights'
+        self.weights, self.biases = self.saved_weights
+        if hasattr(self.train_func, 'init'): self.train_func.init(self.sizes)
 
-    def set(self, activation_func = Sigmoid, cost_func = Quadratic, last_layer_activation_func = None, regularization = None):
+    def set_neuron(self, activation_func = Sigmoid, last_layer_activation_func = None, cost_func = Quadratic):
         self.act_func = activation_func
-        self.cost_func = cost_func
         self.last_layer_act_func = last_layer_activation_func or self.act_func
+        self.cost_func = cost_func
+
+    def set_regularization(self, regularization = RegularNone()):
         self.regularization = regularization
 
+    def set_train_func(self, train_func = Sgd(0.1)):
+        self.train_func = train_func
+
+    def set_dropout(self, dropout = None):
+        self.dropout = dropout
+
     def feedforward(self, a):
-        (a, _, _) = self.feedforward_layers(a)
+        (a, _, _) = self.feedforward_layers(a, enable_dropout = False)
         return a
 
-    def feedforward_layers(self, a):
+    def feedforward_layers(self, a, enable_dropout = False):
         a_layers = [a]
         z_layers = [None]
         for i, (weight, bias) in enumerate(zip(self.weights, self.biases)):
+            is_last_layer = (i == (self.num_layers - 2))
+            if self.dropout and not enable_dropout: weight = self.dropout.adjust_weight(weight)
             z = np.dot(weight, a) + bias
-            a = self.last_layer_act_func.f(z) if i == len(self.biases) else self.act_func.f(z)
+            if is_last_layer:
+                a = self.last_layer_act_func.f(z) 
+            else:   # hidden layer
+                a = self.act_func.f(z)
+                if self.dropout and enable_dropout: self.dropout.process(z, a)
             a_layers.append(a)
             z_layers.append(z)
         return (a, a_layers, z_layers)
 
     def back_propogation(self, x, y):
-        a, a_layers, z_layers = self.feedforward_layers(x)
+        a, a_layers, z_layers = self.feedforward_layers(x, enable_dropout = True)
         delta_w, delta_b = [], []
         for layer in range(self.num_layers-1, 0, -1):
             if layer == self.num_layers-1:  # the last layer
-                #delta = self.cost_func.derivative(a, y)
-                delta = self.cost_func.delta(a, y)
+                delta = self.cost_func.delta(a, y, self.last_layer_act_func)
             else:
                 delta = np.dot(self.weights[layer].transpose(), delta)
                 #delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
@@ -168,48 +304,50 @@ class Network(object):
         delta_b.reverse()
         return delta_w, delta_b
 
-    def mini_batch_update_single(self, training_data, learning_rate):
-        # training for each training data once
-        delta_w = [np.zeros(w.shape) for w in self.weights]
-        delta_b = [np.zeros(b.shape) for b in self.biases]
-        for x, y in training_data:
-            delta_w_i, delta_b_i = self.back_propogation(x, y)
-            delta_w = [w + w_i for w, w_i in zip(delta_w, delta_w_i)]
-            delta_b = [b + b_i for b, b_i in zip(delta_b, delta_b_i)]
-        self.weights = [w - learning_rate / len(training_data) * dw for w, dw in zip(self.weights, delta_w)]
-        self.biases = [d - learning_rate / len(training_data) * dd for d, dd in zip(self.biases, delta_b)]
-        #Debug.print_('weights:', self.weights, 'biases:', self.biases)
+    @classmethod
+    def unpack_data(cls, data):
+        nx, ny, data_size = data[0][0].size, data[0][1].size, len(data)
+        data_x = np.array([x for x, y in data]).reshape((data_size, nx)).transpose()
+        data_y = np.array([y for x, y in data]).reshape((data_size, ny)).transpose()
+        return (data_x, data_y)
 
-    def mini_batch_update(self, training_data, learning_rate):
+    def mini_batch_update(self, mini_batch_data, training_size):
         # training for the whole mini_batch data once
-        nx, ny, data_size = training_data[0][0].size, training_data[0][1].size, len(training_data)
-        mini_batch_x = np.array([x for x, y in training_data]).reshape((data_size, nx)).transpose()
-        mini_batch_y = np.array([y for x, y in training_data]).reshape((data_size, ny)).transpose()
-        delta_w, delta_b = self.back_propogation(mini_batch_x, mini_batch_y)
-        self.weights = [w - learning_rate / data_size * dw for w, dw in zip(self.weights, delta_w)]
-        self.biases = [d - learning_rate / data_size * dd for d, dd in zip(self.biases, delta_b)]
+        mini_batch_data = self.unpack_data(mini_batch_data)
+        delta_w, delta_b = self.back_propogation(*mini_batch_data)
+        self.weights, self.biases = self.train_func.update_weights(self.weights, self.biases, delta_w, delta_b, len(mini_batch_data), training_size, self.regularization)
         #Debug.print_('weights:', self.weights, 'biases:', self.biases)
 
     # stochastic gradient descent
-    def sgd(self, training_data, epoch, mini_batch_size, learning_rate, test_data = []):
+    def train(self, training_data, epoch, mini_batch_size, test_data = []):
+        def output_info(epoch_i):
+            test_data_accuracy = 100*self.accuracy(test_data)
+            training_data_accuracy = 100*self.accuracy(training_data, convert = True)
+            training_data_cost = self.cost(training_data)
+            print 'epoch %d: cost %.3f accurate rate %.2f%%, %.2f%%, elapsed: %.1fs' % (epoch_i, training_data_cost, training_data_accuracy, test_data_accuracy, time.time() - time_start)
         # training_data, [(x0, y0), (x1, y1), ...]
+        training_size = len(training_data)
         time_start = time.time()
-        if test_data:
-            print 'start: accurate rate %.2f%%, elapsed: %.1fs' % (100*self.test(test_data), time.time() - time_start)
+        if test_data: output_info(0)
         for t in range(epoch):
             np.random.shuffle(training_data)
             start = 0
-            while start < len(training_data):
-                mini_batch_data = training_data[start:min(start+mini_batch_size, len(training_data))]
+            while start < training_size:
+                mini_batch_data = training_data[start:min(start+mini_batch_size, training_size)]
                 start += mini_batch_size
-                self.mini_batch_update(mini_batch_data, learning_rate)
-                #self.mini_batch_update_single(mini_batch_data, learning_rate)
-            if test_data:
-                print 'epoch %d: accurate rate %.2f%%, elapsed: %.1fs' % (t, 100*self.test(test_data), time.time() - time_start)
+                self.mini_batch_update(mini_batch_data, training_size)
+            if test_data: output_info(t+1)
 
-    def test(self, test_data):
-        num_pass = sum([y == np.argmax(self.feedforward(x)) for x, y in test_data])
-        return num_pass * 1.0 / len(test_data)
+    def cost(self, training_data):
+        data = self.unpack_data(training_data)
+        return self.cost_func.cost(self.feedforward(data[0]), data[1]) + self.regularization.cost(self.weights, len(training_data))
+
+    def accuracy(self, test_data, convert = False):
+        if convert:
+            test_data = self.unpack_data(test_data)
+            test_data = (test_data[0], np.argmax(test_data[1], axis = 0))
+        num_pass = (np.argmax(self.feedforward(test_data[0]), axis = 0) == test_data[1]).sum()
+        return num_pass * 1.0 / test_data[1].size
 
     def save(self, filename):
         data = {'sizes': self.sizes,
@@ -231,14 +369,12 @@ if __name__ == '__main__':
     import mnist_loader
     training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
     net = Network([784, 30, 10])
-    #net.sgd(training_data, 2, 10, 3.0, test_data = test_data)
     #net.save('network.txt')
     net.set(cost_func = CrossEntropy)
     #Debug.ENABLE = True
     #Debug.output_file('output5.txt')
     #net.load('network.txt')
-    #net.sgd(training_data, 1, 10, 3.0, test_data = test_data)
-    net.sgd(training_data, 30, 10, 3.0, test_data = test_data)
+    net.train(training_data, 30, 10, 3.0, test_data = test_data)
 
 
 
