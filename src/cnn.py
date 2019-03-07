@@ -5,13 +5,6 @@ import numpy as np
 import time, sys, json
 import pprint
 
-# activation function: sigmoid, softmax(output layer), tanh, rectified linear(ReLU)
-# cost function: quadratic, cross-entropy
-# regularization: none, L2, L1, dropout, artificially expanding training data
-# weight initialization: all zero, random, random with good variance
-# stochastic gradient descent: momentum-based
-
-# hyper-parameters: learning rate, epoch (early stopping), regularization lambda, mini-batch size
 
 class Debug(object):
     ENABLE = False
@@ -261,8 +254,102 @@ class EpochStop(object):
             return True
         return False
 
-########### neural network ####################
-class Network(object):
+########### convolutional neural network ####################
+class ConvLayer(object):
+    def __init__(self, sizes, activation_func = ReLU):
+        # (i, j, q, p), i*j filter matrix, q is the deep length of input data, p is the deep length of output data
+        self.filter_shape, self.input_deep, self.output_deep = (sizes[0], sizes[1]), sizes[2], sizes[3]
+        self.act_func = activation_func
+        # 4D, p * q * (i * j)
+        self.weights = np.random.randn(self.output_deep, self.input_deep, *self.filter_shape)
+        # 4D, p * 1 * 1
+        self.biases = np.zeros((self.output_deep, 1, 1))
+        self.a_for_back_propogation = None
+
+    def conv2d(self, a, f):
+        # refer: https://stackoverflow.com/questions/43086557/convolve2d-just-by-using-numpy
+        # a: 3D matrix q *(m * n), f: filter weights, 4D matrix (include deep) (p * q * (i * j))
+        # output: 3D matrix (include deep) (p * (m-i+1) * (n-j+1))
+        assert a.ndim == 3, 'invalid dimention of a'
+        assert f.ndim == 4, 'invlaid dimention of f'
+        view_shape = tuple(np.subtract(a.shape[1:], f.shape[2:]) + 1) + (a.shape[0],) + f.shape[2:]
+        view_strides = a.strides[1:] + a.strides
+        # ((m-i+1) * (n-j+1) * q * i * j)
+        view_matrix = np.lib.stride_tricks.as_strided(a, view_shape, view_strides, writeable = False)
+        return np.einsum('pqij,klqij->pkl', f, view_matrix)  # p is deep length of output
+
+    def back_conv2d(self, a, f):
+        # a: 3D matrix q *(m * n),
+        # f: 3D matrix (include deep) (p * (m-i+1) * (n-j+1))
+        # output: filter weights, 4D matrix (include deep) (p * q * (i * j))
+        assert a.ndim == 3, 'invalid dimention of a'
+        assert f.ndim == 3, 'invlaid dimention of f'
+        view_shape = tuple(np.subtract(a.shape[1:], f.shape[1:]) + 1) + (a.shape[0],) + f.shape[1:]
+        view_strides = a.strides[1:] + a.strides
+        # (i * j * q * (m-i+1) * (n-j+1))
+        view_matrix = np.lib.stride_tricks.as_strided(a, view_shape, view_strides, writeable = False)
+        return np.einsum('pkl,ijqkl->pqij', f, view_matrix)
+
+    def feedforward(self, a, in_back_propogation = False):
+        assert a.shape[0] == self.input_deep, 'invalid input deep'
+        z = self.conv2d(a, self.weights) + self.biases
+        a_output = self.act_func.f(z)
+        if in_back_propogation: self.a_for_back_propogation = a
+        return a_output
+
+    def back_propogation(self, delta):
+        assert delta.ndim == 3, 'invalid dimension for delta'
+        assert delta.shape[0] == self.output_deep, 'invalid output deep'
+        # delta: 3D matrix (include deep) (p * (m-i+1) * (n-j+1))
+        self.delta_b = delta.sum(axis = (1,2))
+        self.delta_w = self.back_conv2d(self.a_for_back_propogation, delta)
+        pad_len = self.filter_shape[0] - 1
+        # delta_pad: (p * (m+i-1) * (n+j-1))
+        delta_pad = np.pad(delta, ((0, 0), (pad_len, pad_len), (pad_len, pad_len)), 'constant', constant_values = 0)
+        # weights: 4D matrix (include deep) (p * q * (i * j)), q is the deep length of input data, p is the deep length of output data
+        back_weights = np.rot90(self.weights, 2, axes = (2,3))
+        # turn to: (q * p * (i * j))
+        back_weights = np.transpose(back_weights, axes = [1, 0, 2, 3])
+        # input: delta_pad: (p * (m+i-1) * (n+j-1)), f: filter weights, 4D matrix (include deep) (q * p * (i * j))
+        # output: like origin a, 3D matrix q *(m * n)
+        z = self.conv2d(delta_pad, back_weights)
+        return z
+        
+    def update_weights(self, mini_batch_data_size, training_size):
+        learning_rate = 0.3
+        self.weights = self.weights - learning_rate / mini_batch_data_size * self.delta_w
+        self.biases = self.biases - learning_rate / mini_batch_data_size * self.delta_b
+
+class PoolingLayer(object):
+    def __init__(self, strides = 2):
+        self.strides = strides
+
+    def feedforward(self, a, in_back_propogation = False):
+        # MAX pooling
+        # a: 3D matrix q *(m * n)
+        assert a.ndim == 3, 'invalid dimention of a'
+        view_shape = (a.shape[0], a.shape[1]/self.strides, a.shape[2]/self.strides, self.strides, self.strides)
+        view_strides = (a.strides[0], a.strides[1]*self.strides, a.strides[2]*self.strides, a.strides[1], a.strides[2])
+        view_matrix = np.lib.stride_tricks.as_strided(a, view_shape, view_strides, writeable = False)
+        # 5D matrix, q * m/stride * n/stride * stride * stride
+        a =  view_matrix.max(axis = (3,4))
+        # save argmax index for back propogation
+        c = view_matrix.reshape(view_matrix.shape[0], view_matrix.shape[1], view_matrix.shape[2], -1)
+        self.index_for_back_propogation = np.argmax(c, axis = -1)
+        return a
+
+    def back_propogation(self, delta):
+        assert delta.ndim == 3, 'invalid dimention of delta'
+        delta_shape = (delta.shape[0], delta.shape[1], delta.shape[2], self.strides*self.strides)
+        z = np.zeros(delta_shape).reshape(-1, delta_shape[-1])
+        z[range(z.shape[0]), np.ravel(self.index_for_back_propogation)] = np.ravel(delta)
+        z = z.reshape(delta.shape[0], delta.shape[1]*self.strides, delta.shape[2]*self.strides)
+        return z
+        
+    def update_weights(self, mini_batch_data_size, training_size):
+        pass
+
+class FcLayer(object):
     def __init__(self, sizes):
         self.init(sizes)
         self.init_weights()
@@ -289,7 +376,7 @@ class Network(object):
         if hasattr(self.train_func, 'init'): self.train_func.init(self.sizes)
         if hasattr(self.stop, 'init'): self.stop.init()
 
-    def set_neuron(self, activation_func = Sigmoid, last_layer_activation_func = None, cost_func = Quadratic):
+    def set_neuron(self, activation_func = Sigmoid, last_layer_activation_func = None, cost_func = CrossEntropy):
         self.act_func = activation_func
         self.last_layer_act_func = last_layer_activation_func or self.act_func
         self.cost_func = cost_func
@@ -303,44 +390,58 @@ class Network(object):
     def set_dropout(self, dropout = None):
         self.dropout = dropout
 
-    def set_stop(self, stop = EarlyStop(10)):
+    def set_stop(self, stop = EarlyStop(30)):
         self.stop = stop
 
-    def feedforward(self, a):
-        (a, _, _) = self.feedforward_layers(a, enable_dropout = False)
-        return a
-
-    def feedforward_layers(self, a, enable_dropout = False):
-        a_layers = [a]
-        z_layers = [None]
+    def feedforward(self, a, in_back_propogation = False):
+        a = a.reshape(-1, 1)
+        if in_back_propogation: self.a_layers_for_back_propogation = [a]
         for i, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             is_last_layer = (i == (self.num_layers - 2))
-            if self.dropout and not enable_dropout: weight = self.dropout.adjust_weight(weight)
+            if self.dropout and not in_back_propogation: weight = self.dropout.adjust_weight(weight)
             z = np.dot(weight, a) + bias
             if is_last_layer:
                 a = self.last_layer_act_func.f(z)
             else:   # hidden layer
                 a = self.act_func.f(z)
-                if self.dropout and enable_dropout: self.dropout.process(z, a)
-            a_layers.append(a)
-            z_layers.append(z)
-        return (a, a_layers, z_layers)
+                if self.dropout and in_back_propogation: self.dropout.process(z, a)
+            if in_back_propogation: self.a_layers_for_back_propogation.append(a)
+        return a
 
-    def back_propogation(self, x, y):
-        a, a_layers, z_layers = self.feedforward_layers(x, enable_dropout = True)
-        delta_w, delta_b = [], []
-        for layer in range(self.num_layers-1, 0, -1):
+    def back_propogation(self, y):
+        self.delta_w, self.delta_b = [], []
+        for layer in range(self.num_layers)[::-1]:
             if layer == self.num_layers-1:  # the last layer
-                delta = self.cost_func.delta(a, y, self.last_layer_act_func)
+                delta = self.cost_func.delta(self.a_layers_for_back_propogation[layer], y, self.last_layer_act_func)
             else:
                 delta = np.dot(self.weights[layer].T, delta)
                 #delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
-                delta *= self.act_func.derivative_a(a_layers[layer])  # delta for layer
-            delta_w.append(np.dot(delta, a_layers[layer-1].T))
-            delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
-        delta_w.reverse()
-        delta_b.reverse()
-        return delta_w, delta_b
+                delta *= self.act_func.derivative_a(self.a_layers_for_back_propogation[layer])  # delta for layer
+            if layer > 0:
+                self.delta_w.append(np.dot(delta, self.a_layers_for_back_propogation[layer-1].T))
+                self.delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
+        self.delta_w.reverse()
+        self.delta_b.reverse()
+        size = int(np.sqrt(delta.size))
+        assert size == 13, 'invalid size'
+        delta = delta.reshape(1, size, size)
+        return delta
+
+    def update_weights(self, mini_batch_data_size, training_size):
+        learning_rate = 0.3
+        self.weights = [self.regularization.update_weights(w, learning_rate, training_size) - learning_rate / mini_batch_data_size * dw for w, dw in zip(self.weights, self.delta_w)]
+        self.biases = [b - learning_rate / mini_batch_data_size * db for b, db in zip(self.biases, self.delta_b)]
+
+class ConvNetwork(object):
+    def __init__(self, input_sizes, conv_sizes, fc_sizes):
+        # input_sizes: [input layer, m*n*q (input deep)], conv_sizes: [i,j,p (output deep)], fc_sizes: [full connected hidden layer, output layer]
+        self.input_sizes, self.input_deep = input_sizes[:2], input_sizes[2]
+        self.conv_layer = ConvLayer([conv_sizes[0], conv_sizes[1], self.input_deep, conv_sizes[2]])
+        pooling_strides = 2
+        self.pooling_layer = PoolingLayer(pooling_strides)
+        fc_input_size = (input_sizes[0]-conv_sizes[0]+1) * (input_sizes[1]-conv_sizes[1]+1) * conv_sizes[2] / pooling_strides / pooling_strides
+        self.fc_layer = FcLayer([fc_input_size] + fc_sizes)
+        self.layers = [self.conv_layer, self.pooling_layer, self.fc_layer]
 
     @classmethod
     def unpack_data(cls, data):
@@ -349,11 +450,28 @@ class Network(object):
         data_y = np.array([y for x, y in data]).reshape((data_size, ny)).T
         return (data_x, data_y)
 
+    def feedforward(self, a, in_back_propogation = False):
+        for layer in self.layers:
+            a = layer.feedforward(a, in_back_propogation)
+        return a
+        
+    def back_propogation(self, delta):
+        for layer in self.layers[::-1]:
+            delta = layer.back_propogation(delta)
+        return delta
+        
+    def update_weights(self, mini_batch_data_size, training_size):
+        for layer in self.layers:
+            layer.update_weights(mini_batch_data_size, training_size)
+        
     def mini_batch_update(self, mini_batch_data, training_size):
         # training for the whole mini_batch data once
-        mini_batch_data = self.unpack_data(mini_batch_data)
-        delta_w, delta_b = self.back_propogation(*mini_batch_data)
-        self.weights, self.biases = self.train_func.update_weights(self.weights, self.biases, delta_w, delta_b, len(mini_batch_data), training_size, self.regularization)
+        #mini_batch_data = self.unpack_data(mini_batch_data)
+        for x, y in mini_batch_data:
+            self.feedforward(x, in_back_propogation = True)
+            self.back_propogation(y)
+            self.update_weights(len(mini_batch_data), training_size)
+        #self.weights, self.biases = self.train_func.update_weights(self.weights, self.biases, delta_w, delta_b, len(mini_batch_data), training_size, self.regularization)
         #Debug.print_('weights:', self.weights, 'biases:', self.biases)
 
     # stochastic gradient descent
@@ -369,13 +487,13 @@ class Network(object):
             else:
                 print 'epoch %d: cost %.3f training accuracy %.2f%%, elapsed: %.1fs' \
                     % (print_training_info.training_epoch, training_data_cost, training_data_accuracy, time.time() - time_start)
-        self.ready_for_train()
+        #self.ready_for_train()
         # training_data, [(x0, y0), (x1, y1), ...]
         training_size = len(training_data)
         time_start = time.time()
         test_data_accuracy = self.accuracy(test_data) if test_data else None
         print_training_info(test_data_accuracy)
-        while not self.stop.stop(test_data_accuracy):
+        while not self.fc_layer.stop.stop(test_data_accuracy):
             np.random.shuffle(training_data)
             start = 0
             while start < training_size:
@@ -385,17 +503,15 @@ class Network(object):
             test_data_accuracy = self.accuracy(test_data) if test_data else None
             print_training_info(test_data_accuracy)
 
-    def cost(self, training_data, include_regular_cost = False):
-        data = self.unpack_data(training_data)
-        regular_cost = self.regularization.cost(self.weights, len(training_data)) if include_regular_cost else 0
-        return self.cost_func.cost(self.feedforward(data[0]), data[1]) + regular_cost
+    def cost(self, training_data):
+        return sum([self.fc_layer.cost_func.cost(self.feedforward(x), y) for x, y in training_data])
 
     def accuracy(self, test_data, convert = False):
         if convert:
-            test_data = self.unpack_data(test_data)
-            test_data = (test_data[0], np.argmax(test_data[1], axis = 0))
-        num_pass = (np.argmax(self.feedforward(test_data[0]), axis = 0) == test_data[1]).sum()
-        return num_pass * 1.0 / test_data[1].size
+            num_pass = sum([(np.argmax(self.feedforward(x), axis = 0) == np.argmax(y, axis = 0)) for x, y in test_data])
+        else:
+            num_pass = sum([(np.argmax(self.feedforward(x), axis = 0) == y) for x, y in test_data])
+        return num_pass * 1.0 / len(test_data)
 
     def save(self, filename):
         data = {'sizes': self.sizes,
@@ -413,16 +529,18 @@ class Network(object):
         self.biases = [np.array(b) for b in data['biases']]
 
 
+
 if __name__ == '__main__':
     import mnist_loader
+    # 50000, 10000, 10000
     training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
-    net = Network([784, 30, 10])
-    #net.save('network.txt')
-    net.set(cost_func = CrossEntropy)
-    #Debug.ENABLE = True
-    #Debug.output_file('output5.txt')
-    #net.load('network.txt')
-    net.train(training_data, 30, 10, 3.0, test_data = test_data)
+    #training_data = training_data[:10000]
+    #test_data = test_data[:1000]
+    training_data = [(x.reshape(1, 28, 28), y) for x, y in training_data]
+    test_data = [(x.reshape(1, 28, 28), y) for x, y in test_data]
+    # input_sizes: [input layer, m*n*q (input deep)], conv_sizes: [i,j,p (output deep)], fc_sizes: [full connected hidden layer, output layer]        
+    net = ConvNetwork([28, 28, 1], [3, 3, 1], [30, 10])
+    net.train(training_data, 30, test_data = test_data)
 
 
 
