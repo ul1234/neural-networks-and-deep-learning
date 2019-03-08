@@ -265,6 +265,7 @@ class ConvLayer(object):
         # 4D, p * 1 * 1
         self.biases = np.zeros((self.output_deep, 1, 1))
         self.a_for_back_propogation = None
+        self.delta_w = self.delta_b = None
 
     def conv2d(self, a, f):
         # refer: https://stackoverflow.com/questions/43086557/convolve2d-just-by-using-numpy
@@ -294,15 +295,21 @@ class ConvLayer(object):
         assert a.shape[0] == self.input_deep, 'invalid input deep'
         z = self.conv2d(a, self.weights) + self.biases
         a_output = self.act_func.f(z)
-        if in_back_propogation: self.a_for_back_propogation = a
+        if in_back_propogation: self.a_for_back_propogation = [a, a_output]
         return a_output
 
     def back_propogation(self, delta):
         assert delta.ndim == 3, 'invalid dimension for delta'
         assert delta.shape[0] == self.output_deep, 'invalid output deep'
+        assert delta.shape == self.a_for_back_propogation[1].shape, 'invalid shape'
         # delta: 3D matrix (include deep) (p * (m-i+1) * (n-j+1))
-        self.delta_b = delta.sum(axis = (1,2))
-        self.delta_w = self.back_conv2d(self.a_for_back_propogation, delta)
+        delta[self.a_for_back_propogation[1] <= 0] = 0  # back for ReLU
+        delta_b = delta.sum(axis = (1,2))
+        delta_w = self.back_conv2d(self.a_for_back_propogation[0], delta)
+        #Debug.ENABLE = True
+        #Debug.print_('a_for_back_propogation:', self.a_for_back_propogation, 'delta:', delta, 'delta_w:', delta_w)
+        self.delta_b = delta_b if self.delta_b is None else self.delta_b + delta_b
+        self.delta_w = delta_w if self.delta_w is None else self.delta_w + delta_w
         pad_len = self.filter_shape[0] - 1
         # delta_pad: (p * (m+i-1) * (n+j-1))
         delta_pad = np.pad(delta, ((0, 0), (pad_len, pad_len), (pad_len, pad_len)), 'constant', constant_values = 0)
@@ -319,6 +326,7 @@ class ConvLayer(object):
         learning_rate = 0.3
         self.weights = self.weights - learning_rate / mini_batch_data_size * self.delta_w
         self.biases = self.biases - learning_rate / mini_batch_data_size * self.delta_b
+        self.delta_w = self.delta_b = None
 
 class PoolingLayer(object):
     def __init__(self, strides = 2):
@@ -353,6 +361,7 @@ class FcLayer(object):
     def __init__(self, sizes):
         self.init(sizes)
         self.init_weights()
+        self.delta_w = self.delta_b = None
 
     def init(self, sizes):
         # sizes, number of neurons of [input_layer, hidden layer, ..., output_layer]
@@ -409,7 +418,7 @@ class FcLayer(object):
         return a
 
     def back_propogation(self, y):
-        self.delta_w, self.delta_b = [], []
+        delta_w, delta_b = [], []
         for layer in range(self.num_layers)[::-1]:
             if layer == self.num_layers-1:  # the last layer
                 delta = self.cost_func.delta(self.a_layers_for_back_propogation[layer], y, self.last_layer_act_func)
@@ -418,11 +427,13 @@ class FcLayer(object):
                 #delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
                 delta *= self.act_func.derivative_a(self.a_layers_for_back_propogation[layer])  # delta for layer
             if layer > 0:
-                self.delta_w.append(np.dot(delta, self.a_layers_for_back_propogation[layer-1].T))
-                self.delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
-        self.delta_w.reverse()
-        self.delta_b.reverse()
-        size = int(np.sqrt(delta.size))
+                delta_w.append(np.dot(delta, self.a_layers_for_back_propogation[layer-1].T))
+                delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
+        delta_w.reverse()
+        delta_b.reverse()
+        self.delta_b = delta_b if self.delta_b is None else [b+db for b, db in zip(self.delta_b, delta_b)]
+        self.delta_w = delta_w if self.delta_w is None else [w+dw for w, dw in zip(self.delta_w, delta_w)]
+        size = int(np.sqrt(delta.size/1))
         assert size == 13, 'invalid size'
         delta = delta.reshape(1, size, size)
         return delta
@@ -431,6 +442,7 @@ class FcLayer(object):
         learning_rate = 0.3
         self.weights = [self.regularization.update_weights(w, learning_rate, training_size) - learning_rate / mini_batch_data_size * dw for w, dw in zip(self.weights, self.delta_w)]
         self.biases = [b - learning_rate / mini_batch_data_size * db for b, db in zip(self.biases, self.delta_b)]
+        self.delta_w = self.delta_b = None
 
 class ConvNetwork(object):
     def __init__(self, input_sizes, conv_sizes, fc_sizes):
@@ -534,8 +546,8 @@ if __name__ == '__main__':
     import mnist_loader
     # 50000, 10000, 10000
     training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
-    #training_data = training_data[:10000]
-    #test_data = test_data[:1000]
+    training_data = training_data[:1000]
+    test_data = test_data[:1000]
     training_data = [(x.reshape(1, 28, 28), y) for x, y in training_data]
     test_data = [(x.reshape(1, 28, 28), y) for x, y in test_data]
     # input_sizes: [input layer, m*n*q (input deep)], conv_sizes: [i,j,p (output deep)], fc_sizes: [full connected hidden layer, output layer]        
