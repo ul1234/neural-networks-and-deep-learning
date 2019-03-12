@@ -9,6 +9,7 @@ import pprint
 class Debug(object):
     ENABLE = False
     OUTPUT_FILE = ''
+    _count = 0
 
     @classmethod
     def output_file(cls, filename):
@@ -22,6 +23,11 @@ class Debug(object):
                 pp = pprint.PrettyPrinter(width = 200, depth = 10, stream = open(cls.OUTPUT_FILE, 'a') if cls.OUTPUT_FILE else None)
                 pp.pprint(s)
                 sys.stdout.flush()
+
+    @classmethod
+    def count(cls):
+        cls._count += 1
+        return cls._count
 
 ########### activation function ####################
 class Sigmoid(object):
@@ -257,11 +263,14 @@ class EpochStop(object):
 ########### convolutional neural network ####################
 class ConvLayer(object):
     def __init__(self, sizes, activation_func = ReLU):
+        self.trainable = True
         # (i, j, q, p), i*j filter matrix, q is the deep length of input data, p is the deep length of output data
         self.filter_shape, self.input_deep, self.output_deep = (sizes[0], sizes[1]), sizes[2], sizes[3]
         self.act_func = activation_func
         # 4D, p * q * (i * j)
-        self.weights = np.random.randn(self.output_deep, self.input_deep, *self.filter_shape)
+        #self.weights = np.random.randn(self.output_deep, self.input_deep, *self.filter_shape)
+        self.weights = np.random.rand(self.output_deep, self.input_deep, *self.filter_shape)
+        self.weights[self.weights < 0.5] -= 1
         # 4D, p * 1 * 1
         self.biases = np.zeros((self.output_deep, 1, 1))
         self.a_for_back_propogation = None
@@ -304,7 +313,7 @@ class ConvLayer(object):
         assert delta.shape == self.a_for_back_propogation[1].shape, 'invalid shape'
         # delta: 3D matrix (include deep) (p * (m-i+1) * (n-j+1))
         delta[self.a_for_back_propogation[1] <= 0] = 0  # back for ReLU
-        delta_b = delta.sum(axis = (1,2))
+        delta_b = delta.sum(axis = (1,2)).reshape(self.biases.shape)
         delta_w = self.back_conv2d(self.a_for_back_propogation[0], delta)
         #Debug.ENABLE = True
         #Debug.print_('a_for_back_propogation:', self.a_for_back_propogation, 'delta:', delta, 'delta_w:', delta_w)
@@ -321,7 +330,7 @@ class ConvLayer(object):
         # output: like origin a, 3D matrix q *(m * n)
         z = self.conv2d(delta_pad, back_weights)
         return z
-        
+
     def update_weights(self, mini_batch_data_size, training_size):
         learning_rate = 0.3
         self.weights = self.weights - learning_rate / mini_batch_data_size * self.delta_w
@@ -330,6 +339,7 @@ class ConvLayer(object):
 
 class PoolingLayer(object):
     def __init__(self, strides = 2):
+        self.trainable = False
         self.strides = strides
 
     def feedforward(self, a, in_back_propogation = False):
@@ -353,12 +363,13 @@ class PoolingLayer(object):
         z[range(z.shape[0]), np.ravel(self.index_for_back_propogation)] = np.ravel(delta)
         z = z.reshape(delta.shape[0], delta.shape[1]*self.strides, delta.shape[2]*self.strides)
         return z
-        
+
     def update_weights(self, mini_batch_data_size, training_size):
         pass
 
 class FcLayer(object):
     def __init__(self, sizes):
+        self.trainable = True
         self.init(sizes)
         self.init_weights()
         self.delta_w = self.delta_b = None
@@ -403,6 +414,7 @@ class FcLayer(object):
         self.stop = stop
 
     def feedforward(self, a, in_back_propogation = False):
+        self.a_shape_for_back_propogation = a.shape
         a = a.reshape(-1, 1)
         if in_back_propogation: self.a_layers_for_back_propogation = [a]
         for i, (weight, bias) in enumerate(zip(self.weights, self.biases)):
@@ -424,8 +436,7 @@ class FcLayer(object):
                 delta = self.cost_func.delta(self.a_layers_for_back_propogation[layer], y, self.last_layer_act_func)
             else:
                 delta = np.dot(self.weights[layer].T, delta)
-                #delta *= self.act_func.derivative(z_layers[layer])  # delta for layer
-                delta *= self.act_func.derivative_a(self.a_layers_for_back_propogation[layer])  # delta for layer
+                if layer > 0: delta *= self.act_func.derivative_a(self.a_layers_for_back_propogation[layer])  # delta for layer
             if layer > 0:
                 delta_w.append(np.dot(delta, self.a_layers_for_back_propogation[layer-1].T))
                 delta_b.append(np.dot(delta, np.ones((delta.shape[1],1))))
@@ -433,9 +444,7 @@ class FcLayer(object):
         delta_b.reverse()
         self.delta_b = delta_b if self.delta_b is None else [b+db for b, db in zip(self.delta_b, delta_b)]
         self.delta_w = delta_w if self.delta_w is None else [w+dw for w, dw in zip(self.delta_w, delta_w)]
-        size = int(np.sqrt(delta.size/1))
-        assert size == 13, 'invalid size'
-        delta = delta.reshape(1, size, size)
+        delta = delta.reshape(self.a_shape_for_back_propogation)
         return delta
 
     def update_weights(self, mini_batch_data_size, training_size):
@@ -466,16 +475,16 @@ class ConvNetwork(object):
         for layer in self.layers:
             a = layer.feedforward(a, in_back_propogation)
         return a
-        
+
     def back_propogation(self, delta):
         for layer in self.layers[::-1]:
             delta = layer.back_propogation(delta)
         return delta
-        
+
     def update_weights(self, mini_batch_data_size, training_size):
         for layer in self.layers:
             layer.update_weights(mini_batch_data_size, training_size)
-        
+
     def mini_batch_update(self, mini_batch_data, training_size):
         # training for the whole mini_batch data once
         #mini_batch_data = self.unpack_data(mini_batch_data)
@@ -494,11 +503,11 @@ class ConvNetwork(object):
             training_data_accuracy = 100*self.accuracy(training_data, convert = True)
             training_data_cost = self.cost(training_data)
             if test_data_accuracy:
-                print 'epoch %d: cost %.3f training accuracy %.2f%%, test accuracy %.2f%%, elapsed: %.1fs' \
-                    % (print_training_info.training_epoch, training_data_cost, training_data_accuracy, 100*test_data_accuracy, time.time() - time_start)
+                print('epoch %d: cost %.3f training accuracy %.2f%%, test accuracy %.2f%%, elapsed: %.1fs' \
+                    % (print_training_info.training_epoch, training_data_cost, training_data_accuracy, 100*test_data_accuracy, time.time() - time_start))
             else:
-                print 'epoch %d: cost %.3f training accuracy %.2f%%, elapsed: %.1fs' \
-                    % (print_training_info.training_epoch, training_data_cost, training_data_accuracy, time.time() - time_start)
+                print('epoch %d: cost %.3f training accuracy %.2f%%, elapsed: %.1fs' \
+                    % (print_training_info.training_epoch, training_data_cost, training_data_accuracy, time.time() - time_start))
         #self.ready_for_train()
         # training_data, [(x0, y0), (x1, y1), ...]
         training_size = len(training_data)
@@ -546,12 +555,14 @@ if __name__ == '__main__':
     import mnist_loader
     # 50000, 10000, 10000
     training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
-    training_data = training_data[:1000]
-    test_data = test_data[:1000]
+    #training_data = training_data[:1000]
+    #test_data = test_data[:1000]
     training_data = [(x.reshape(1, 28, 28), y) for x, y in training_data]
     test_data = [(x.reshape(1, 28, 28), y) for x, y in test_data]
-    # input_sizes: [input layer, m*n*q (input deep)], conv_sizes: [i,j,p (output deep)], fc_sizes: [full connected hidden layer, output layer]        
-    net = ConvNetwork([28, 28, 1], [3, 3, 1], [30, 10])
+    # input_sizes: [input layer, m*n*q (input deep)], conv_sizes: [i,j,p (output deep)], fc_sizes: [full connected hidden layer, output layer]
+    net = ConvNetwork([28, 28, 1], [3, 3, 32], [100, 10])
+    net.fc_layer.set_regularization(RegularL2(0.1))
+    net.fc_layer.set_dropout(Dropout(0.5))
     net.train(training_data, 30, test_data = test_data)
 
 

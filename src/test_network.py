@@ -30,7 +30,7 @@ class TestScenario(object):
     def ReLU_softmax_loglikelihood_regularL2(self, learning_rate = 0.1, regular_lmda = 0.01):
         self.net.set_neuron(activation_func = ReLU, last_layer_activation_func = Softmax, cost_func = Loglikelihood)
         self.net.set_train_func(Sgd(learning_rate))
-        self.net.set_regularization(RegularL1(regular_lmda))
+        self.net.set_regularization(RegularL2(regular_lmda))
 
     def tanh_softmax_loglikelihood(self, learning_rate = 0.1):
         self.net.set_neuron(activation_func = Tanh, last_layer_activation_func = Softmax, cost_func = Loglikelihood)
